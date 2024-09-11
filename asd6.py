@@ -9,7 +9,7 @@ from io import BytesIO
 # Path to save the model and data frame file
 model_folder = 'C:\\asd6'
 model_path = os.path.join(model_folder, 'ASD6.pkl')
-data_frame_template_path = 'C:\\asd6\\The data frame file to be analyzed.xlsx'
+data_frame_template_path = 'The data frame file to be analyzed.xlsx'
 
 # Function to train the model and save it as "ASD6"
 def train_and_save_model():
