@@ -19,7 +19,7 @@ def train_and_save_model():
             os.makedirs(model_folder)
         
         # Load the training data from the specified path
-        file_path = r'C:\asd6\final_classified_loss_with_reasons_60_percent_ordered.xlsx'
+        file_path = r'final_classified_loss_with_reasons_60_percent_ordered.xlsx'
         data = pd.read_excel(file_path)
         
         # Prepare the features and target
