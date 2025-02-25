@@ -158,3 +158,4 @@ if uploaded_analyze_file is not None:
         analyze_data(analyze_data_df)  # Automatically trigger analysis after upload
     except Exception as e:
         st.error(f"Error loading the file: {str(e)}")
+        st.title("المطور / مشهور العباس ")
