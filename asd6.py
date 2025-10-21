@@ -16,8 +16,7 @@ if os.name == "nt":
 else:
     model_folder = "asd6"
 
-if not os.path.exists(model_folder):
-    os.makedirs(model_folder)
+os.makedirs(model_folder, exist_ok=True)
 
 model_path = os.path.join(model_folder, 'ASD6.pkl')
 data_frame_template_path = 'The data frame file to be analyzed.xlsx'
@@ -34,7 +33,9 @@ def train_and_save_model():
         X = data[['V1', 'V2', 'V3', 'A1', 'A2', 'A3']]
         y = data['Loss_Status'].apply(lambda x: 1 if x == 'Loss' else 0)
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
 
         model = RandomForestClassifier(
             n_estimators=500,
@@ -83,12 +84,45 @@ def add_loss_reason(row, voltage_threshold=5, imbalance_ratio=0.5):
 
     return "✅ لا توجد حالة فقد مؤكدة"
 
+# ===================== كشف عدادات ثنائية الفاز =====================
+def detect_two_phase_meter(row, current_threshold=0.2, pair_similarity=0.15,
+                           min_pair_current=0.8, voltage_min=180):
+    """
+    يكتشف العدادات الموصلة فعليًا على فازتين:
+    - فازة واحدة تيارها ≈ صفر (أقل من current_threshold) وجهدها طبيعي (> voltage_min).
+    - الفازتان الأخريان تياراتهما متقاربة (فارق نسبي <= pair_similarity) وليستا ضعيفتين (< min_pair_current).
+    يعيد: (is_two_phase, unused_phase, used_pair)
+    """
+    V = [row['V1'], row['V2'], row['V3']]
+    A = [row['A1'], row['A2'], row['A3']]
+    phase_names = ['A1', 'A2', 'A3']
+
+    zero_like_idxs = [i for i in range(3) if A[i] < current_threshold and V[i] > voltage_min]
+    if len(zero_like_idxs) != 1:
+        return (False, None, None)
+
+    unused_idx = zero_like_idxs[0]
+    used_idxs = [i for i in range(3) if i != unused_idx]
+    a_used = [A[i] for i in used_idxs]
+
+    hi, lo = max(a_used), min(a_used)
+    similar = (hi > 0) and ((hi - lo) / hi <= pair_similarity)
+    strong_enough = all(x >= min_pair_current for x in a_used)
+
+    if similar and strong_enough:
+        return (True, phase_names[unused_idx], f"{phase_names[used_idxs[0]]}+{phase_names[used_idxs[1]]}")
+    return (False, None, None)
+
 # ===================== حساب درجة الخطورة =====================
 def calculate_severity(row):
+    # عداد فازتين مُستثنى: لا نعتبره خطرًا
+    if row.get('Two_Phase_Meter', False):
+        return 0.0
+
     V1, V2, V3 = row['V1'], row['V2'], row['V3']
     A1, A2, A3 = row['A1'], row['A2'], row['A3']
 
-    # حساب شدة عدم توازن التيار
+    # شدة عدم توازن التيار
     max_a, min_a = max(A1, A2, A3), min(A1, A2, A3)
     current_imbalance = 0 if max_a == 0 else (max_a - min_a) / max_a
 
@@ -96,7 +130,6 @@ def calculate_severity(row):
     max_v, min_v = max(V1, V2, V3), min(V1, V2, V3)
     voltage_diff = 0 if max_v == 0 else (max_v - min_v) / max_v
 
-    # النقاط المجمعة
     score = current_imbalance
     if V1 < 5 or V2 < 5 or V3 < 5:
         score += 0.5
@@ -124,16 +157,35 @@ def analyze_data(data):
             return
 
         model = joblib.load(model_path)
+
         X = data[['V1', 'V2', 'V3', 'A1', 'A2', 'A3']]
         predictions = model.predict(X)
         data['Predicted_Loss'] = predictions
+
+        # أسباب الفقد (لكل الصفوف)
         data['Reason'] = data.apply(add_loss_reason, axis=1)
+
+        # كشف عدادات الفازتين + توضيح السبب
+        tp_df = data.apply(
+            lambda r: pd.Series(detect_two_phase_meter(r), index=['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair']),
+            axis=1
+        )
+        data[['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair']] = tp_df
+        mask_tp = data['Two_Phase_Meter'] == True
+        data.loc[mask_tp, 'Reason'] = data.loc[mask_tp].apply(
+            lambda r: f"ℹ️ عداد ثنائي الفاز (مستثنى) — الفازة غير المستخدمة: {r['Unused_Phase']}، والفازات المستخدمة: {r['Two_Phase_Pair']}",
+            axis=1
+        )
+
+        # درجة الخطورة + أولوية
         data['Severity_Score'] = data.apply(calculate_severity, axis=1)
         data['Priority'] = data.apply(classify_priority, axis=1)
 
-        # تصنيف الحالات
+        # نوع الحالة
         def classify_case(row):
-            if row['Predicted_Loss'] == 1 and "⚠️" in row['Reason']:
+            if row['Two_Phase_Meter']:
+                return "ℹ️ عداد ثنائي الفاز (مستثنى)"
+            elif row['Predicted_Loss'] == 1 and "⚠️" in row['Reason']:
                 return "📊 فاقد مؤكد (النموذج + المحددات)"
             elif row['Predicted_Loss'] == 1:
                 return "🤖 فاقد مكتشف من النموذج فقط"
@@ -141,30 +193,36 @@ def analyze_data(data):
                 return "🧠 حالة تنطبق عليها المحددات ولم يكتشفها النموذج"
             else:
                 return "✅ سليم"
+
         data['Case_Type'] = data.apply(classify_case, axis=1)
 
-        # استخراج المجموعات
+        # مجموعات العرض
         detected_loss = data[data['Predicted_Loss'] == 1]
         high_priority = detected_loss[detected_loss['Reason'].str.contains('⚠️')]
         logical_only = data[data['Case_Type'].str.contains("المحددات")]
-        high_impact = data[data['Severity_Score'] >= 0.7].sort_values(by='Severity_Score', ascending=False)
+        two_phase_only = data[data['Two_Phase_Meter'] == True]
+        high_impact = data[(data['Severity_Score'] >= 0.7) & (~data['Two_Phase_Meter'])]\
+                        .sort_values(by='Severity_Score', ascending=False)
 
-        # ========== 📊 الإحصائيات العامة ==========
+        # ========== 📊 الإحصائيات ==========
         total_cases = len(data)
+        tp_count = len(two_phase_only)
+        effective_total = max(total_cases - tp_count, 1)  # لتجنب القسمة على صفر
         detected_count = len(detected_loss)
         logical_count = len(logical_only)
         high_impact_count = len(high_impact)
-        estimated_loss_ratio = round(((detected_count + logical_count) / total_cases) * 100, 2)
+        estimated_loss_ratio = round(((detected_count + logical_count) / effective_total) * 100, 2)
 
         st.markdown("## 📈 إحصائيات التحليل")
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("📦 إجمالي العدادات", total_cases)
-        col2.metric("🤖 حالات مكتشفة بالنموذج", detected_count)
-        col3.metric("🧠 حالات هندسية فقط", logical_count)
-        col4.metric("🔴 عالية التأثير", high_impact_count)
-        col5.metric("📊 نسبة الفقد التقديرية", f"{estimated_loss_ratio}%")
+        col2.metric("ℹ️ عدادات ثنائية الفاز (مستثناة)", tp_count)
+        col3.metric("🤖 حالات مكتشفة بالنموذج", detected_count)
+        col4.metric("🧠 حالات هندسية فقط", logical_count)
+        col5.metric("🔴 عالية التأثير", high_impact_count)
+        col6.metric("📊 نسبة الفقد (بعد الاستثناء)", f"{estimated_loss_ratio}%")
 
-        # ========== عرض الجداول ==========
+        # ========== الجداول ==========
         st.markdown("---")
         st.subheader("📊 جميع حالات الفقد المكتشفة من النموذج")
         st.dataframe(detected_loss)
@@ -178,13 +236,17 @@ def analyze_data(data):
         st.subheader("🔴 الحالات الأعلى تأثيرًا وخطورة")
         st.dataframe(high_impact)
 
-        # تصدير للتحميل
+        st.subheader("ℹ️ عدادات ثنائية الفاز (مستثناة تلقائيًا)")
+        st.dataframe(two_phase_only)
+
+        # تقرير Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             detected_loss.to_excel(writer, sheet_name="Model_Detected", index=False)
             high_priority.to_excel(writer, sheet_name="High_Priority", index=False)
             logical_only.to_excel(writer, sheet_name="Logical_Only", index=False)
             high_impact.to_excel(writer, sheet_name="High_Impact", index=False)
+            two_phase_only.to_excel(writer, sheet_name="Two_Phase_Meters", index=False)
         output.seek(0)
 
         st.download_button(
@@ -202,7 +264,7 @@ st.sidebar.title("⚙️ إعدادات التطبيق")
 st.sidebar.markdown("🔍 استخدم الخيارات أدناه لتحليل بيانات الفقد المحتملة.")
 
 st.title("⚡ نظام ذكي لتحليل واكتشاف حالات الفقد")
-st.markdown("### يجمع بين النموذج التنبؤي والتحليل الهندسي لتحديد الحالات المؤكدة والأكثر تأثيرًا.")
+st.markdown("### يجمع بين النموذج التنبؤي والتحليل الهندسي مع استثناء العدادات ثنائية الفاز لتقليل الإنذارات الخاطئة.")
 
 # تحميل القالب
 if os.path.exists(data_frame_template_path):
