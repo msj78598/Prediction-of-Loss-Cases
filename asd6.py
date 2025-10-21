@@ -17,7 +17,6 @@ else:
     model_folder = "asd6"
 
 os.makedirs(model_folder, exist_ok=True)
-
 model_path = os.path.join(model_folder, 'ASD6.pkl')
 data_frame_template_path = 'The data frame file to be analyzed.xlsx'
 
@@ -69,7 +68,7 @@ def add_loss_reason(row, voltage_threshold=5, imbalance_ratio=0.5):
     elif V3 < voltage_threshold and A3 > 0.2:
         return "⚠️ فقد بسبب جهد منخفض جدًا وتيار على V3"
 
-    # عدم توازن التيارات (احتمال جمبر)
+    # عدم توازن التيارات (اشتباه جمبر)
     max_current = max(A1, A2, A3)
     min_current = min(A1, A2, A3)
     if max_current > 0 and (max_current - min_current) / max_current > imbalance_ratio:
@@ -84,49 +83,61 @@ def add_loss_reason(row, voltage_threshold=5, imbalance_ratio=0.5):
 
     return "✅ لا توجد حالة فقد مؤكدة"
 
-# ===================== كشف عدادات ثنائية الفاز =====================
-def detect_two_phase_meter(row, current_threshold=0.2, pair_similarity=0.15,
-                           min_pair_current=0.8, voltage_min=180):
+# ===================== كشف عدادات ثنائية الفاز (يغطي V≈0 أو I≈0) =====================
+def detect_two_phase_meter(
+    row,
+    current_zero_thr=0.25,   # ما نعدّه "≈ صفر" للتيار
+    pair_similarity=0.18,    # تقارب ≤ 18%
+    min_pair_current=0.8,    # يشترط أن تياري الفازتين المستخدمتين ليسا ضعيفين جدًا
+    voltage_min_ok=180,      # جهد طبيعي
+    voltage_zero_thr=20      # ما نعدّه "≈ صفر" للجهد (فازة غير موصولة)
+):
     """
-    يكتشف العدادات الموصلة فعليًا على فازتين:
-    - فازة واحدة تيارها ≈ صفر (أقل من current_threshold) وجهدها طبيعي (> voltage_min).
-    - الفازتان الأخريان تياراتهما متقاربة (فارق نسبي <= pair_similarity) وليستا ضعيفتين (< min_pair_current).
-    يعيد: (is_two_phase, unused_phase, used_pair)
+    يعدّ العداد ثنائي الفاز إذا:
+      - وُجدت فازة واحدة فقط:
+          * تيارها ≈ صفر AND جهدها طبيعي، أو
+          * جهدها ≈ صفر (غير موصولة).
+      - والفازتان الأخريان تياراتهما متقاربة (نسبة الفرق ≤ pair_similarity).
+    يرجع: (is_two_phase, unused_phase, used_pair, unused_reason)
     """
     V = [row['V1'], row['V2'], row['V3']]
     A = [row['A1'], row['A2'], row['A3']]
-    phase_names = ['A1', 'A2', 'A3']
+    names = ['A1', 'A2', 'A3']
 
-    zero_like_idxs = [i for i in range(3) if A[i] < current_threshold and V[i] > voltage_min]
+    zero_like_idxs = []
+    for i in range(3):
+        cond_current_zero_voltage_ok = (A[i] < current_zero_thr and V[i] >= voltage_min_ok)
+        cond_voltage_zero = (V[i] <= voltage_zero_thr)
+        if cond_current_zero_voltage_ok or cond_voltage_zero:
+            zero_like_idxs.append(i)
+
     if len(zero_like_idxs) != 1:
-        return (False, None, None)
+        return (False, None, None, None)
 
     unused_idx = zero_like_idxs[0]
-    used_idxs = [i for i in range(3) if i != unused_idx]
-    a_used = [A[i] for i in used_idxs]
+    used_idxs = [j for j in range(3) if j != unused_idx]
+    a_used = [A[j] for j in used_idxs]
 
-    hi, lo = max(a_used), min(a_used)
-    similar = (hi > 0) and ((hi - lo) / hi <= pair_similarity)
-    strong_enough = all(x >= min_pair_current for x in a_used)
+    hi, lo = (max(a_used), min(a_used))
+    similar = (hi == 0 and lo == 0) or (hi > 0 and (hi - lo) / max(hi, 1e-9) <= pair_similarity)
+    strong_enough = all(x >= min_pair_current for x in a_used) or (hi == 0 and lo == 0)
 
     if similar and strong_enough:
-        return (True, phase_names[unused_idx], f"{phase_names[used_idxs[0]]}+{phase_names[used_idxs[1]]}")
-    return (False, None, None)
+        unused_reason = "جهد غير موصول (V≈0)" if V[unused_idx] <= voltage_zero_thr else "تيار ≈ صفر مع جهد طبيعي"
+        return (True, names[unused_idx], f"{names[used_idxs[0]]}+{names[used_idxs[1]]}", unused_reason)
+
+    return (False, None, None, None)
 
 # ===================== حساب درجة الخطورة =====================
 def calculate_severity(row):
-    # عداد فازتين مُستثنى: لا نعتبره خطرًا
     if row.get('Two_Phase_Meter', False):
-        return 0.0
-
+        return 0.0  # مستثنى
     V1, V2, V3 = row['V1'], row['V2'], row['V3']
     A1, A2, A3 = row['A1'], row['A2'], row['A3']
 
-    # شدة عدم توازن التيار
     max_a, min_a = max(A1, A2, A3), min(A1, A2, A3)
     current_imbalance = 0 if max_a == 0 else (max_a - min_a) / max_a
 
-    # فرق الجهد بين الفازات
     max_v, min_v = max(V1, V2, V3), min(V1, V2, V3)
     voltage_diff = 0 if max_v == 0 else (max_v - min_v) / max_v
 
@@ -165,15 +176,20 @@ def analyze_data(data):
         # أسباب الفقد (لكل الصفوف)
         data['Reason'] = data.apply(add_loss_reason, axis=1)
 
-        # كشف عدادات الفازتين + توضيح السبب
+        # كشف عدادات الفازتين + حقول مساعدة
         tp_df = data.apply(
-            lambda r: pd.Series(detect_two_phase_meter(r), index=['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair']),
+            lambda r: pd.Series(
+                detect_two_phase_meter(r),
+                index=['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair','Unused_Reason']
+            ),
             axis=1
         )
-        data[['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair']] = tp_df
+        data[['Two_Phase_Meter','Unused_Phase','Two_Phase_Pair','Unused_Reason']] = tp_df
+
+        # كتابة سبب واضح للعدادات المستثناة
         mask_tp = data['Two_Phase_Meter'] == True
         data.loc[mask_tp, 'Reason'] = data.loc[mask_tp].apply(
-            lambda r: f"ℹ️ عداد ثنائي الفاز (مستثنى) — الفازة غير المستخدمة: {r['Unused_Phase']}، والفازات المستخدمة: {r['Two_Phase_Pair']}",
+            lambda r: f"ℹ️ عداد ثنائي الفاز (مستثنى) — الفازة غير المستخدمة: {r['Unused_Phase']} ({r['Unused_Reason']})، والفازات المستخدمة: {r['Two_Phase_Pair']}",
             axis=1
         )
 
