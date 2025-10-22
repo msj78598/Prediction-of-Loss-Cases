@@ -13,11 +13,8 @@ st.set_page_config(page_title="نظام تحليل الفقد الذكي", page_
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
 # ============ مسارات ============
-if os.name == "nt":
-    model_folder = r"C:\asd6"
-else:
-    model_folder = "asd6"
-os.makedirs(model_folder, exist_ok=True)
+model_folder = os.path.dirname(__file__)   # المجلد الحالي للتطبيق
+MODEL_PATH = os.path.join(model_folder, "ASD6.pkl")
 
 MODEL_PATH = os.path.join(model_folder, "ASD6.pkl")  # نموذجك المدرّب مسبقًا
 DATA_TEMPLATE = "The data frame file to be analyzed.xlsx"
@@ -297,3 +294,4 @@ if upload is not None:
 
 st.markdown("---")
 st.markdown("👨‍💻 المطور: مشهور العباس — آخر تحديث اليوم")
+
