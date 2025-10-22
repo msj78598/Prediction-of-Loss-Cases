@@ -33,10 +33,11 @@ pyparsing==3.2.0
 python-dateutil==2.9.0.post0
 pytz==2024.2
 requests==2.32.3
-scikit-learn==1.5.2
+scikit-learn==1.5.1
 scipy==1.14.1
 streamlit>=1.26.0
 tenacity==9.0.0
 watchdog==5.0.3
 XlsxWriter==3.2.0
+
 
